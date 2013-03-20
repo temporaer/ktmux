@@ -1,0 +1,131 @@
+#!/usr/bin/perl
+#
+# ktmux_helper: Run krenew in the background for tmux.
+# Usage: ktmux_helper [options]
+# Options: -I <path>   Specify path to kinit.
+#          -L <path>   Specify path to klist.
+#          -R <path>   Specify path to krenew.
+#          -T <path>   Specify path to tmux.
+# Notes: Doesn't handle multiple sessions properly.
+#
+
+use FindBin;
+use Getopt::Std;
+use POSIX ":sys_wait_h";
+
+my $PROG = $FindBin::Script;
+
+# Ensure tmux is our parent and find its PID.
+our $tmux_pid = &get_tmux_pid;
+unless ($tmux_pid) {
+  print STDERR "$PROG: Not a child of tmux!\n";
+  exit 100;
+}
+
+# Ensure there isn't already a helper running for this tmux.
+my $tmux_helper = &get_tmux_helper;
+exit 0 if $tmux_helper;
+$tmux_helper = $$;
+
+my %opts;
+getopts('I:L:R:T:', \%opts);
+
+my $kinit = $opts{'I'} || "kinit";
+my $klist = $opts{'L'} || "klist";
+my $krenew = $opts{'R'} || "krenew";
+my $tmux = $opts{'T'} || "tmux";
+
+my $avoid_race = 0;
+
+my $exitasap = 0;
+my $pid = 0;
+
+$SIG{INT} = \&cleanup;
+$SIG{QUIT} = \&cleanup;
+$SIG{TERM} = \&cleanup;
+$SIG{USR1} = \&want_credentials;
+
+LOOP: while (&ping_tmux) {
+  $pid = fork;
+  die "$PROG: Can't fork: $!\n" unless defined $pid;
+
+  if ($pid) {
+    while (&ping_tmux) {
+      my $exited = waitpid $pid, WNOHANG;
+      goto LOOP if $exited == $pid || $exited < 0;
+      sleep 1;
+    }
+
+    # tmux is dead so kill krenew.
+    kill QUIT, $pid;
+    waitpid $pid, 0;
+    exit 0;
+  }
+  else {
+    exit 1 if &check_credentials;
+    exec $krenew, "-K", "60";
+    print "$PROG: Can't run krenew: $!\n";
+    exit 111;
+  }
+}
+
+sub get_tmux_pid {
+  my $pid = getppid;
+  my $cmd = `/bin/ps -o args= -p $pid`;
+  return $pid if $cmd =~ /\btmux\b/;
+  return undef;
+}
+
+sub check_kinit_child {
+  foreach my $pid (`/bin/ps -o ppid= -C kinit`) {
+    return 1 if $pid =~ /^\s*$tmux_pid\s*$/;
+  }
+  return 0;
+}
+
+sub get_tmux_helper {
+  my $pid = undef;
+  if (open IN, "pgrep -x -P $tmux_pid $PROG | ") {
+    while (<IN>) {
+      chomp;
+      s/[^\d]//g;
+      next if $_ == $$;
+      $pid = $_;
+      last;
+    }
+    close IN;
+  }
+  return $pid;
+}
+
+sub ping_tmux {
+  return kill 0, $tmux_pid;
+}
+
+# Try to check existing Kerberos credentials.
+sub check_credentials {
+  system $klist, "-s";
+  return 1 if $? < 0;
+  return 0 unless $?;
+  kill USR1, $tmux_helper;
+  return 111;
+}
+
+# We were signalled by our child which noticed that our credentials expired.
+sub want_credentials {
+  return sleep 1 if $avoid_race;
+  $avoid_race = 1;
+  # Do we already know?
+  system $tmux, "new-window", "-n", "Renew Kerberos credentials", "exec $kinit" unless &check_kinit_child;
+  sleep 1;
+  $avoid_race = 0;
+}
+
+sub cleanup {
+  unless ($exitasap) {
+    $exitasap = 1;
+    kill $pid;
+    waitpid $pid, WNOHANG;
+    exit 0;
+  }
+}

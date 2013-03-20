@@ -1,0 +1,36 @@
+#!/bin/bash
+#
+# ktmux: Start tmux and ktmux_helper.
+# Usage: ktmux [options]
+# Options: -I <path>   Pass path to kinit through to ktmux_helper.
+#          -L <path>   Pass path to klist through to ktmux_helper.
+#          -R <path>   Pass path to krenew through to ktmux_helper.
+#          -S <path>   Socket path for tmux.
+#          -T <path>   Path to tmux.
+#          -n <name>   Window name for new tmux session.
+#          -s <name>   Session name for new tmux session.
+#          -t <name>   Target session name for new tmux session.
+#
+
+tmux=tmux
+helper_opts=
+tmux_opts=
+session_opts=
+while getopts ":I:L:R:S:T:n:s:t:" opt; do
+  case $opt in
+    I|L|R) helper_opts="$helper_opts -$opt $OPTARG";;
+    T) tmux="$OPTARG"; helper_opts="$helper_opts -$opt $OPTARG";;
+    n|s|t) session_opts="$session_opts -$opt $OPTARG";;
+    S) tmux_opts="$tmux_opts -$opt $OPTARG";;
+  esac
+done
+shift $((OPTIND-1))
+
+if [ -z "$KRB5CCNAME" ]; then
+  krb5ccname="$KRB5CCNAME"
+  [ -z "$krb5ccname" ] && krb5ccname=FILE:${TMPDIR:-/tmp}/krb5cc_${UID}_ktmux_$$
+  export KRB5CCNAME="$krb5ccname"
+fi
+klist -s || kinit
+
+exec $tmux ${tmux_opts## } new-session ${session_opts## } -d ';' set-environment KRB5CCNAME "$KRB5CCNAME" ';' attach ';' run-shell "ktmux_helper ${helper_opts## }"
