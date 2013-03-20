@@ -11,6 +11,8 @@
 
 use FindBin;
 use Getopt::Std;
+use List::Util qw/first/;
+use Proc::ProcessTable;
 use POSIX ":sys_wait_h";
 
 my $PROG = $FindBin::Script;
@@ -71,8 +73,17 @@ LOOP: while (&ping_tmux) {
 
 sub get_tmux_pid {
   my $pid = getppid;
-  my $cmd = `/bin/ps -o args= -p $pid`;
-  return $pid if $cmd =~ /\btmux\b/;
+  my $tobj = new Proc::ProcessTable;
+  my $tab = $tobj->table();
+  open LOG, ">$ENV{HOME}/.ktmux_helper.log" or die $!;
+  while($pid != 1){
+      my $parent = first{$_->pid == $pid}@$tab;
+      last unless $parent;
+      my $cmd = $parent->cmndline;
+      print LOG "parent cmd: $cmd\n";
+      return $pid if $cmd =~ /\btmux\b/;
+      $pid = $parent->ppid;
+  }
   return undef;
 }
 
